@@ -1,0 +1,684 @@
+---
+title: "hw 1 stat 574"
+output: html_document
+date: "2023-09-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(skimr)
+library(corrplot)
+library(gridExtra)
+library(rpart)
+library(tree)
+library(rpart.plot)
+library(CHAID)
+library(caret)
+library(ROCR)
+library(Hmisc)
+```
+
+```{r}
+hospital.data<- read.csv(file="C:/Users/Banri/downloads/DataScienceLectures/HOMEWORKS/DATA SETS/hospital_data.csv",
+header=TRUE, sep=",")
+glimpse(hospital.data)
+```
+
+```{r}
+#splitting data 80 20
+set.seed(105388)
+
+sample <- sample(c(TRUE,FALSE), nrow(hospital.data), replace = TRUE, prob = c(0.8,0.2))
+train <- hospital.data[sample,]
+test <- hospital.data[!sample,]
+
+# or can do the old method learned 
+# n = nrow(df)
+# prop = .8
+# set.seed(123)
+# train_id = sample(1:n, size=round(n*prop), replace = FALSE)
+# test_id = (1:n)[-which(1:n %in% train_id)]
+# train_set = df[train_id,]
+# test_set = df[test_id,]
+```
+
+```{r}
+#fitting full rehression tree RSS splitting
+
+# may potentially need to specifiy which variables are factors in the code 
+reg.tree.full <- rpart(surgery_cost ~ MedID + gender + age + BMI + ASA + surgery_duration_min, data=train, method="anova", xval=10, cp=0)
+
+printcp(reg.tree.full)
+#xval is number of cross validations
+#cp is the complexitiy parameter
+#anova if regression and class if classifcation
+
+
+# using alt method of tree from last year
+mod.tree = tree(surgery_cost ~. , data=train) # might call surgery cost twice
+summary(mod.tree)
+plot(mod.tree)
+text(mod.tree, pretty = 0)
+# can use this method to see what our cp needs to be, if terminal node in summary is 6 then find the corresponding number of splits from the printcp
+```
+
+```{r}
+# when choosing k, its the number of folds, and by default we use 10, in the prune.mod we can see we need the number of terminal nodes in size which will provide the smallest error rate, we then use the cp from earlier go down to size 6 and use that cp in order to put the proper cp in the reg.tree.RSS
+cv.out = cv.tree(mod.tree, k = 10)
+cv.out
+
+prune.mod = prune.tree(mod.tree, best=cv.out$size[which.min(cv.out$dev)])
+prune.mod
+#the prune.mod 
+```
+
+
+```{r}
+#regression tree with rss spliting and cost complexity
+
+reg.tree.RSS = rpart(surgery_cost ~., data=train, method = "anova", cp=0.0087)
+rpart.plot(reg.tree.RSS, type = 3)
+#0.01 produces 6 splits as shown earlier, cp 0.0087 shows 7
+# going to try to find optimal prune
+```
+
+```{r}
+#computing prediction accuracy for testing data
+# going to follow method in textbook however another thing to consider once confusion matrices is used is that accuracy can be found by 
+#(tp + tn) / (tp + fn + tn + fp)
+
+P_surgery_cost = predict(reg.tree.RSS, newdata = test)
+
+accuracy10 = ifelse(abs(test$surgery_cost - P_surgery_cost) < 0.10*test$surgery_cost,1,0)
+print(mean(accuracy10))
+
+accuracy15 = ifelse(abs(test$surgery_cost - P_surgery_cost) < 0.15*test$surgery_cost,1,0)
+print(mean(accuracy15))
+
+accuracy20 = ifelse(abs(test$surgery_cost - P_surgery_cost) < 0.20*test$surgery_cost,1,0)
+print(mean(accuracy20))
+
+#0.45021
+#0.65778
+#0.80364
+
+# when checking important to note that used diff seed
+
+```
+
+```{r}
+#GOING TO KEEP CHAID IN ONE R MARKDOWN SECTION
+# now regression tree with CHAID splitting and cost complexity pruning
+
+# we are creating categorical variables similar to the class statement in SAS, we are creating categorical variables and the ntile function assigns each observation to one of the 10 categories (percentiles)
+hospital.data <- mutate(hospital.data, age_cat=ntile(age,10), BMI_cat=ntile(BMI,10), surgery_duration_min_cat = ntile(surgery_duration_min,10), surgery_cost_cat=ntile(surgery_cost, 10))
+
+#Splitting data 80 - 20
+set.seed(105388)
+
+sample <- sample(c(TRUE,FALSE), nrow(hospital.data), replace = TRUE, prob = c(0.8,0.2))
+train <- hospital.data[sample,]
+test <- hospital.data[!sample,]
+
+#for chaid i want to learn how we are choosing the limitations (nvm read the package help page, it automatically splits based off the smallest adjusted p value)
+reg.tree.CHAID<- chaid(as.factor(surgery_cost_cat) ~ as.factor(age_cat) + as.factor(BMI_cat) + as.factor(ASA) + as.factor(surgery_duration_min_cat), data=train, control=chaid_control(maxheight=4))
+plot(reg.tree.CHAID, type="simple")
+
+
+# now computing the accuracy for the CHAID prediction
+predclass <- predict(reg.tree.CHAID, newdata = test)
+test <- cbind(test,predclass)
+
+# the textbook uses the training set for the aggregation first step, but answer sheet uses the test set, 
+# ill do both to see the difference, but pretty sure produce same results
+
+aggr.data <- aggregate(test$surgery_cost, by=list(predclass), FUN=mean)
+aggr.data$predclass <- aggr.data$Group.1
+aggr.data$P_surgery_cost <- aggr.data$x
+test <- inner_join(test, aggr.data, by='predclass')
+glimpse(test)
+#vs
+# how i would do it from the textbook
+#aggr.data <- aggregate(train$surgery_cost, by=list(train$surgery_cost_cat), FUN=mean) #pred values
+#now cmombining observed
+#aggr.data$predclass <- aggr.data$Group.1
+#aggr.data$P_surgery_cost <- aggr.data$x
+#test <- left_join(test, aggr.data, by='predclass')
+#glimpse(test)
+# it produces error and the code above works so ill wont debug it LOL
+
+# accuracy time
+
+
+# P_surgery_cost = predict(reg.tree.RSS, newdata = test)
+#accuracy10 = ifelse(abs(test$surgery_cost - P_surgery_cost) < 0.10*test$surgery_cost,1,0)
+#print(mean(accuracy10))
+accuracy10_chaid <- ifelse(abs(test$surgery_cost - test$P_surgery_cost) < 0.10*test$surgery_cost,1,0)
+print(mean(accuracy10_chaid))
+
+accuracy15_chaid <- ifelse(abs(test$surgery_cost - test$P_surgery_cost) < 0.15*test$surgery_cost,1,0)
+print(mean(accuracy15_chaid))
+
+accuracy20_chaid <- ifelse(abs(test$surgery_cost - test$P_surgery_cost) < 0.20*test$surgery_cost,1,0)
+print(mean(accuracy20_chaid))
+
+#CHAID
+#0.50911
+#0.68022
+#0.78681
+#RSS
+#0.45021
+#0.65778
+#0.80364
+
+# The RSS tree has higher prediction accuracy within 20% but lower accuracy within 10% and 15%
+
+```
+
+
+
+
+
+
+PROBLEM 2
+```{r}
+cardfraud.data<- read.csv(file="C:/Users/Banri/downloads/DataScienceLectures/HOMEWORKS/DATA SETS/card_transdata.csv",header=TRUE, sep=",")
+glimpse(cardfraud.data)
+```
+GINI
+```{r}
+#splitting data
+cardfraud.data<- read.csv(file="C:/Users/Banri/downloads/DataScienceLectures/HOMEWORKS/DATA SETS/card_transdata.csv",header=TRUE, sep=",")
+glimpse(cardfraud.data)
+
+set.seed(437899)
+
+sample <- sample(c(TRUE,FALSE), nrow(cardfraud.data), replace = TRUE, prob = c(0.8,0.2))
+train <- cardfraud.data[sample,]
+test <- cardfraud.data[!sample,]
+
+# this time we will be doing gini splitting
+# using class since its a classification problem also put parms for classsification to specify gini
+tree.gini <- rpart(fraud ~ ., data = train, method="class", parms = list(split="Gini"),maxdepth=4)
+
+rpart.plot(tree.gini, type=3)
+
+#now lets compute predicted values + accuracy through confusion matrix , also for gini splitting this is easier in R in my opinion
+# also when compared to how i learned to construct confusion matrices in r last year the cutoff range wasnt there so take note and possibly learn how to combine it
+
+#creating predvalues
+pred.values <- predict(tree.gini, test)
+test <- cbind(test,pred.values)
+#essentially what we are doing in code right now is creating a matrix with NA values with the same amount of rows and columns as test and then running a loop to replace any NA values if they fit the criteria then once that is done seeing the rate at which the values are present which will give us our predicitve accuracy
+pred.accuracy <- function(test) {
+  tp <- matrix(NA, nrow=nrow(test),ncol = 99)
+  tn <- matrix(NA, nrow=nrow(test),ncol = 99)
+
+for (i in 1:99) {
+  tp[,i] <- ifelse(test$fraud == 1 & test$"1" > 0.01*i, 1,0)
+  tn[,i] <- ifelse(test$fraud == 0 & test$"1" <= 0.01*i, 1,0)
+  }
+
+trueclassrate <- matrix(NA, nrow=99, ncol= 2)
+for (i in 1:99) {
+  trueclassrate[i,1] <- 0.01*i
+  trueclassrate[i,2] <- sum(tp[,i] + tn[,i])/nrow(test)
+}
+
+print(trueclassrate[which(trueclassrate[,2]==max(trueclassrate[,2])),])
+}
+pred.accuracy(test)
+ # the prediction accuracy for this tree is 98.7745% which corresponds to any cutoff between 0.04 and 0.81
+
+```
+ENTROPY 228
+```{r}
+#now onto the binary classification tree using entropy 
+cardfraud.data<- read.csv(file="C:/Users/Banri/downloads/DataScienceLectures/HOMEWORKS/DATA SETS/card_transdata.csv",header=TRUE, sep=",")
+glimpse(cardfraud.data)
+
+set.seed(437899)
+
+sample <- sample(c(TRUE,FALSE), nrow(cardfraud.data), replace = TRUE, prob = c(0.8,0.2))
+train <- cardfraud.data[sample,]
+test <- cardfraud.data[!sample,]
+
+#similar to the rpart code for gini
+tree.entropy <- rpart(fraud ~., data=train, method="class",parms=list(split="entropy"), maxdepth=4) 
+
+rpart.plot(tree.entropy, type=3)
+
+# can use the function we made earlier in order save time and jus change the values we need to change
+pred.values <- predict(tree.entropy, test)
+test <- cbind(test, pred.values)
+pred.accuracy(test)
+ # the prediction accuracy for this tree is 98.7745% which corresponds to any cutoff between 0.04 and 0.81 which is the same as the gini tree
+```
+CHAID 250
+```{r}
+#now the same thing with CHAID 
+cardfraud.data<- read.csv(file="C:/Users/Banri/downloads/DataScienceLectures/HOMEWORKS/DATA SETS/card_transdata.csv",header=TRUE, sep=",")
+glimpse(cardfraud.data)
+
+#similar to hospital data chaid where we have to create categorical variables within the data set
+#hospital.data <- mutate(hospital.data, age_cat=ntile(age,10), BMI_cat=ntile(BMI,10), surgery_duration_min_cat = ntile(surgery_duration_min,10), surgery_cost_cat=ntile(surgery_cost, 10))
+
+
+cardfraud.data <- mutate(cardfraud.data, 
+                         distance_from_home_cat=ntile(distance_from_home, 10),
+                         distance_from_last_transaction_cat=ntile(distance_from_last_transaction, 10), 
+                         ratio_to_median_purchase_price_cat=ntile(ratio_to_median_purchase_price,10))
+
+glimpse(cardfraud.data)
+
+
+# now onto the splitting
+set.seed(437899)
+
+sample <- sample(c(TRUE,FALSE), nrow(cardfraud.data), replace = TRUE, prob = c(0.8,0.2))
+train <- cardfraud.data[sample,]
+test <- cardfraud.data[!sample,]
+
+tree.chaid <- chaid(as.factor(fraud) ~ as.factor(repeat_retailer)+as.factor(used_chip)+as.factor(used_pin_number)+as.factor(online_order)+as.factor(distance_from_home_cat)+as.factor(distance_from_last_transaction_cat)+as.factor(ratio_to_median_purchase_price_cat), data=train, control=chaid_control(maxheight = 4))
+plot(tree.chaid, type="simple")
+
+# to predict the accuracy for chaid method it is a bit different than for a regression instead we have to create a loop
+
+pred.fraud <- predict(tree.chaid, newdata=test)
+test <- cbind(test, pred.fraud)
+# this one relied heavily on textbook to do 
+truepred <- c()
+n <- nrow(test)
+for (i in 1:n)
+  truepred[i] <- ifelse(test$fraud[i] == test$pred.fraud[i],1,0)
+
+print(truepredrate <- sum(truepred)/length(truepred))
+#accuracy is 0.9656863 lower than gini and entropy compared at 0.987745
+
+# the gini and entropy tree are the same and have the highest prediction accuracy
+
+```
+problem 3
+```{r}
+#problem 3
+# compute the confusion matrix based on the gini tree built in problem 2 
+cardfraud.data<- read.csv(file="C:/Users/Banri/downloads/DataScienceLectures/HOMEWORKS/DATA SETS/card_transdata.csv",header=TRUE, sep=",")
+glimpse(cardfraud.data)
+
+set.seed(437899)
+
+sample <- sample(c(TRUE,FALSE), nrow(cardfraud.data), replace = TRUE, prob = c(0.8,0.2))
+train <- cardfraud.data[sample,]
+test <- cardfraud.data[!sample,]
+
+# this time we will be doing gini splitting
+# using class since its a classification problem also put parms for classsification to specify gini
+tree.gini <- rpart(fraud ~ ., data = train, method="class", parms = list(split="Gini"),maxdepth=4)
+
+#COMPUTING prediction accuracy 
+pred.values <- predict(tree.gini,test)
+test <- cbind(test, pred.values)
+
+tp <- c()
+fp <- c()
+tn <- c()
+fn <- c()
+
+total <- nrow(test)
+# for loop again, remember to not forget any I's !!!!!!!
+for (i in 1:total) {
+  tp[i] <- ifelse(test$"1" [i]> 0.5 & test$fraud[i] == 1, 1, 0)
+  fp[i] <- ifelse(test$"1" [i]> 0.5 & test$fraud[i] == 0, 1, 0)
+  tn[i] <- ifelse(test$"0" [i]> 0.5 & test$fraud[i] == 0, 1, 0)
+  fn[i] <- ifelse(test$"0" [i]> 0.5 & test$fraud[i] == 1, 1, 0)
+}
+
+# this was neat to do but still need to reassign the values for calculation
+cat("true positive is" ,sum(tp))
+cat("false positive is" ,sum(fp))
+cat("true negative is" ,sum(tn))
+cat("false negative is" ,sum(fn))
+cat("the total is", total)
+
+tp = sum(tp)
+fp = sum(fp)
+tn = sum(tn)
+fn = sum(fn)
+
+print(accuracy <- (tp+tn)/total)
+print(misclassrate<- (fp+fn)/total)
+print(sensitivity<- tp/(tp+fn))
+print(FNR<- fn/(tp+fn))
+print(specificity<- tn/(fp+tn))
+print(FPR<- fp/(fp+tn))
+print(precision<- tp/(tp+fp))
+print(NPV<- tn/(fn+tn))
+print(F1score<- 2*tp/(2*tp+fn+fp))
+
+
+
+# new + old way i learned how produces accuracy of .9877 but lets check using the code in the answer sheet 
+####preds_tree01 <- predict(tree.gini, newdata = test, type = 'class') 
+####cm <- confusionMatrix(table(preds_tree01, test$fraud))
+####cm
+#### the four pound sign code works, couldve been used earlier before the cutoff was introuduced BUT ALSO PRODUCED similar results, accuracy was the same but sensitivity and specificity were flipped!
+
+
+# tweaking the above code to include a cut off of 0.50 DIDNT WORK LOL
+#preds_tree01 <- predict(tree.gini, newdata = test, type = 'class') 
+#pred.DT <- ifelse(preds_tree01$"1" > 0.50, "Yes", "No")
+#predicted <- ordered(pred.DT, levels= c("Yes", "No"))
+#actual <- ordered(test$fraud, levels = c("Yes", "No"))
+#cm <- confusionMatrix(table(predicted, actual))
+#cm
+
+# past way we did confusion matrix 
+# ldapredclass = predict(newdata=test_set, lda_fit)$class
+# confusion tb = table(predict_status = ldapredclass, truestatus = testset$Variable)
+# try to use this if doesnt work
+# predictedvalues = predict(newdata=test, tree.gini)
+ # glimpse(predictedvalues)
+# confusion_tb = table(predict_status = predictedvalues, truestatus = test$fraud)
+# also imma use this in the future
+# plotting variable importance
+# plot(varImp(DTModel))
+
+```
+problem 4
+```{r}
+cardfraud.data<- read.csv(file="C:/Users/Banri/downloads/DataScienceLectures/HOMEWORKS/DATA SETS/card_transdata.csv",header=TRUE, sep=",")
+glimpse(cardfraud.data)
+
+set.seed(437899)
+
+sample <- sample(c(TRUE,FALSE), nrow(cardfraud.data), replace = TRUE, prob = c(0.8,0.2))
+train <- cardfraud.data[sample,]
+test <- cardfraud.data[!sample,]
+
+# this time we will be doing gini splitting
+# using class since its a classification problem also put parms for classsification to specify gini
+tree.gini <- rpart(fraud ~ ., data = train, method="class", parms = list(split="Gini"),maxdepth=4)
+
+# similar to computing accuracy and such before but now with a specific range of cutoffs between 0.01 and 0.99
+# so same ol, of pred values then looping, the new part is the binding as well as the interaction with NA values
+pred.values = predict(tree.gini, test)
+test = cbind(test, pred.values)
+
+
+tpos <-matrix(NA,nrow=nrow(test), ncol=102)
+fpos <-matrix(NA,nrow=nrow(test), ncol=102)
+tneg <-matrix(NA,nrow=nrow(test), ncol=102)
+fneg <-matrix(NA,nrow=nrow(test), ncol=102)
+
+for (i in 0:101) {
+  tpos[,i+1] = ifelse(test$fraud == "1" & test$"1" >= 0.01*i,1,0)
+  fpos[,i+1] = ifelse(test$fraud == "0" & test$"1" >= 0.01*i,1,0)
+  tneg[,i+1] = ifelse(test$fraud == "0" & test$"1" < 0.01*i,1,0)
+  fneg[,i+1] = ifelse(test$fraud == "1" & test$"1" < 0.01*i,1,0)
+} 
+
+tp = c()
+fp = c()
+tn = c()
+fn = c()
+accuracy = c()
+misclassrate = c()
+sensitivity = c()
+specificity = c()
+oneminusspec = c()
+cutoff = c()
+
+for (i in 1:102){
+  tp[i] = sum(tpos[,i])
+  fp[i] = sum(fpos[,i])
+  tn[i] = sum(tneg[,i])
+  fn[i] = sum(fneg[,i])
+  total = nrow(test)
+  accuracy[i] <- (tp[i]+tn[i])/total
+  misclassrate[i] <- (fp[i]+fn[i])/total
+  sensitivity[i]<- tp[i]/(tp[i]+fn[i])
+  specificity[i]<- tn[i]/(fp[i]+tn[i])
+  oneminusspec[i]<- fp[i]/(fp[i]+tn[i])
+  cutoff[i]<- 0.01*(i-1)
+}
+
+print(cbind(cutoff, accuracy, misclassrate, sensitivity, specificity))
+# roc curve according to book
+plot(oneminusspec, sensitivity, type="l", lty=1, main="The Receiver Operating Characteristic Curve", xlab="1-Specificity", ylab="Sensitivity")
+points(oneminusspec, sensitivity, pch=0) 
+
+
+# roc curve with color + auc, didnt know how to do the cutoff with it!
+library(ROCR)
+tree_pred = predict(tree.gini, newdata=test, type ="class")
+pred = prediction(as.numeric(tree_pred), as.numeric(test$fraud))
+perf = performance(pred, "tpr", "fpr")
+plot(perf, main = "ROC Curve Tree", colorize=TRUE,lwd=3, avg='threshold', spread.estimate = "boxplot")
+abline(0, 1, lty=3)
+tree_auc = as.numeric(performance(pred, "auc")@y.values)
+tree_auc
+
+# now for point closes to the ideal point on the roc curve
+distance <- c()
+for (i in 1:102)
+  distance[i] <- sqrt(oneminusspec[i]**2 + (1-sensitivity[i])**2)
+
+measures <- cbind(accuracy, misclassrate, sensitivity, specificity, distance, cutoff)
+min.distance <- min(distance)
+print(measures[which(measures[,5]==min.distance),])
+# minimum distance is any cutoff between 0.01 and 0.03
+
+# computing area under the curve  to compare earlier which our bonus code got us
+sensitivity <- sort(sensitivity)
+oneminusspec <- sort(oneminusspec)
+lagx <- Lag(oneminusspec, shift=1)
+lagy <- Lag(sensitivity, shift=1)
+lagx[is.na(lagx)]<- 0 
+lagy[is.na(lagy)]<- 0
+trapezoid <- (oneminusspec - lagx) * (sensitivity+lagy)/2
+print(AUC <- sum(trapezoid))
+#accuracy is .9738818
+
+```
+problem 5
+```{r}
+concussions.data<- read.csv(file="C:/Users/Banri/downloads/DataScienceLectures/HOMEWORKS/DATA SETS/concussions_data.csv",header=TRUE, sep=",")
+glimpse(concussions.data)
+
+# select the best one by comparing weighted macro accuracy, sensitivity, and specificty
+# check notes down below to see, and when starting on homework 2 after start with R to get a better understanding of what the code does rather than starting with SAS
+
+#SPLITTING data 80 20
+set.seed(437899)
+
+sample <- sample(c(TRUE,FALSE), nrow(concussions.data), replace = TRUE, prob = c(0.8,0.2))
+train <- concussions.data[sample,]
+test <- concussions.data[!sample,]
+
+tree.gini <- rpart(concussion ~., data=train, method="class", parms=list(split="Gini"),maxdepth=4)
+
+rpart.plot(tree.gini, type=3)
+
+#computing predicted values
+pred.values <- predict(tree.gini,test)
+
+# now specifiying the specific concussion classes
+test <- cbind(test, pred.values)
+test$maxprob <- pmax(test$'moderate', test$'mild', test$'severe')
+
+# i guess u cant put all three if else statements 
+test$predclass <- ifelse(test$maxprob==test$'moderate', 'moderate',ifelse(test$maxprob == test$'mild', 'mild', 'severe'))
+
+# now defining the function we will be using throughout all the problems
+perf.measures <- function() {
+  # perf measures for each of the classes i will be using the textbook for this part
+  tp<- c()
+  fp<- c()
+  tn<- c()
+  fn<- c()
+  accuracy<- c()
+  misclassrate<- c()
+  sensitivity<- c()
+  FNR<- c()
+  specificity<- c()
+  FPR<- c()
+  precision<- c()
+  NPV<- c()
+  F1score<- c()
+
+  
+class.metrics<- function(class) {
+  tp.class<- ifelse(test$predclass==class & test$concussion==class,1,0)
+  fp.class<- ifelse(test$predclass==class & test$concussion!=class,1,0)
+  tn.class<- ifelse(test$predclass!=class & test$concussion!=class,1,0)
+  fn.class<- ifelse(test$predclass!=class & test$concussion==class,1,0)
+  message('CLASS MEASURES:')
+  message('class:', class)
+  print(paste('tp:', tp[class]<<- sum(tp.class)))
+  print(paste('fp:', fp[class]<<- sum(fp.class)))
+  print(paste('tn:', tn[class]<<- sum(tn.class)))
+  print(paste('fn:', fn[class]<<- sum(fn.class)))
+  total<<- nrow(test)
+
+  print(paste('accuracy:', accuracy[class]<<- (tp[class]+tn[class])/total))
+  print(paste('misclassrate:', misclassrate[class]<<- (fp[class]+fn[class])/total))
+  print(paste('sensitivity:', sensitivity[class]<<- tp[class]/(tp[class]+fn[class])))
+  print(paste('FNR:', FNR[class]<<- fn[class]/(tp[class]+fn[class])))
+  print(paste('specificity:', specificity[class]<<- tn[class]/(fp[class]+tn[class])))
+  print(paste('FPR:', FPR[class]<<- fp[class]/(fp[class]+tn[class])))
+  print(paste('precision:', precision[class]<<- tp[class]/(tp[class]+fp[class])))
+  print(paste('NPV:', NPV[class]<<- tn[class]/(fn[class]+tn[class])))
+  print(paste('F1score:', F1score[class]<<- 2*tp[class]/(2*tp[class]+fn[class]+fp[class])))
+  }
+class.metrics(class='mild')
+class.metrics(class='moderate')
+class.metrics(class='severe')
+  # now onto micro measures which will be similar code to performance measures jus different equations and the same can be said about macro as well
+  
+# micro measures now
+  tp.sum<- sum(tp)
+  fp.sum<- sum(fp)
+  tn.sum<- sum(tn)
+  fn.sum<- sum(fn)
+  
+  message('MICRO MEASURES:')
+  print(paste('accuracy:', accuracy.micro<- (tp.sum+tn.sum)/(tp.sum+fp.sum+tn.sum+fn.sum)))
+  print(paste('misclassrate:', misclassrate.micro<- (fp.sum+fn.sum)/(tp.sum+fp.sum+tn.sum+fn.sum)))
+  print(paste('sensitivity:', sensitivity.micro<- tp.sum/(tp.sum+fn.sum)))
+  print(paste('FNR:', FNR.micro<- fn.sum/(tp.sum+fn.sum)))
+  print(paste('specificity:', specificity.micro<- tn.sum/(fp.sum+tn.sum)))
+  print(paste('FPR:', FPR.micro<- fp.sum/(fp.sum+tn.sum)))
+  print(paste('precision:', precision.micro<- tp.sum/(tp.sum+fp.sum)))
+  print(paste('NPV:', NPV.micro<- tn.sum/(fn.sum+tn.sum)))
+  print(paste('F1-score:', F1score.micro<- 2*tp.sum/(2*tp.sum+fn.sum+fp.sum)))
+  
+# now macro measures
+  message('MACRO MEASURES:')
+  print(paste('accuracy:', accuracy.macro<- mean(accuracy)))
+  print(paste('misclassrate:', misclassrate.macro<- mean(misclassrate)))
+  print(paste('sensitivity:', sensitivity.macro<- mean(sensitivity)))
+  print(paste('FNR:', FNR.macro<- mean(FNR)))
+  print(paste('specificity:', specificity.macro<- mean(specificity)))
+  print(paste('FPR:', FPR.macro<- mean(FPR)))
+  print(paste('precision:', precision.macro<- mean(precision, na.rm=TRUE)))
+  print(paste('NPV:', NPV.macro<- mean(NPV)))
+  print(paste('F1-score:', F1score.macro<- mean(F1score)))
+  
+# now weighted macro measures
+ weight<- c()
+  for (class in 1:3)
+  weight[class]<- (tp[class]+fn[class])/total
+  message('WEIGHTED MACRO MEASURES:')
+  print(paste('accuracy:', accuracy.wmacro<- weight%*%accuracy))
+  print(paste('misclassrate:', misclassrate.wmacro<- weight%*%misclassrate))
+  print(paste('sensitivity:', sensitivity.wmacro<- weight%*%sensitivity))
+  print(paste('FNR:', FNR.wmacro<- weight%*%FNR))
+  print(paste('specificity:', specificity.wmacro<- weight%*%specificity))
+  # error on nonconform argument on specificity so gonna switch weight and specificity for the time being nvm it was jus spelling
+  
+  print(paste('FPR:', FPR.wmacro<- weight%*%FPR))
+  precision[is.na(precision)]<- 0
+  print(paste('precision:', precision.wmacro<- weight%*%precision))
+  print(paste('NPV:', NPV.wmacro<- weight%*%NPV))
+  print(paste('F1-score:', F1score.wmacro<- weight%*%F1score))
+  
+  
+   print(paste('specificity:', specificity.wmacro<- weight%*%specificity))
+}
+ 
+# now using the function we jus created
+perf.measures()
+
+
+
+# now for entropy tree
+tree.entropy <- rpart(concussion ~., data=train, method="class", parms=list(split="entropy"))
+rpart.plot(tree.entropy, type=3)
+# produces the same tree so perf measures are the same as well
+perf.measures()
+
+# now for chaid remember need to creatre into binary classifcation
+# take the continous variables and turn them into categories
+
+concussions.data<- read.csv(file="C:/Users/Banri/downloads/DataScienceLectures/HOMEWORKS/DATA SETS/concussions_data.csv",header=TRUE, sep=",")
+glimpse(concussions.data)
+#creating categorical variables
+concussions.data = mutate(concussions.data, age.cat=ntile(age,10))
+
+set.seed(437890)
+sample <- sample(c(TRUE,FALSE), nrow(concussions.data), replace = TRUE, prob = c(0.8,0.2))
+train <- concussions.data[sample,]
+test <- concussions.data[!sample,]
+
+tree.CHAID = chaid(as.factor(concussion) ~ as.factor(age.cat) + as.factor(nyearsplaying) + as.factor(position) + as.factor(prevconc), data = train)
+plot(tree.CHAID, type="simple")
+
+pred.values <- predict(tree.CHAID, newdata=test)
+
+# extra step for the perf.measures
+test$predclass <- pred.values
+perf.measures()
+
+# THE ENTROPY TREE IS THE BEST TREE IN R
+
+
+```
+
+- multinomial classifies observations into one of three or more classes
+
+- imagine we had green blue red balls, we can look at the confusion matrix of red green and blue
+OR OR OR OR
+- we could view it as predicting green and notgreen 
+SEE the difference between the two
+
+then your micro averaged measures are 
+accuracy, misclass rate, sens, 1-sens, specifc, fpr, precision
+and you combine all the tp, tn, fn, fp, of the 3 classes
+
+red and not red 
++
+blue and not blue
++
+green and not green
+
+then combine to get the values
+
+MACRO measures to the accuracy values of each table then averages it, 
+so lets say we got .77, .84 , .80 for our three accuracys then we would add them all up and divide by 3, getting the average
+
+WEIGTHED MACROS 
+is when in the proportion different measures have different chances of being chose due to the population, i.e.
+- we have 100 balls, 50 green, 40 blue, 10 red
+
+so weighted macro measures would be
+
+50 / (50+40+10) = 0.5 for greens
+40 / 100        = 0.4 for blue 
+10 / 100        =0.1 for red
+
+so NOW WE DO MACRO MEASURSES BUT NOW WITH THE WEIGHT
+instead of (.77 + .84 + .80) / 3
+
+it is now (.77*0.5 + .84*0.4 + .80*0.1) / 3 For the accuracy
+but the same notion applies to all the other equations 
